@@ -83,6 +83,8 @@ public class ClientCnxnSocketNetty extends ClientCnxnSocket {
         this.clientConfig = clientConfig;
         // Client only has 1 outgoing socket, so the event loop group only needs
         // a single thread.
+        // 创建一个 eventLoopGroup 用于后面对异步请求的处理
+        // 且因为客户端只有一个 outgoing Socket 因此只需要一个线程即可
         eventLoopGroup = NettyUtils.newNioOrEpollEventLoopGroup(1 /* nThreads */);
         initProperties();
     }
@@ -128,17 +130,21 @@ public class ClientCnxnSocketNetty extends ClientCnxnSocket {
     void connect(InetSocketAddress addr) throws IOException {
         firstConnect = new CountDownLatch(1);
 
-        Bootstrap bootstrap = new Bootstrap().group(eventLoopGroup)
-                                             .channel(NettyUtils.nioOrEpollSocketChannel())
-                                             .option(ChannelOption.SO_LINGER, -1)
-                                             .option(ChannelOption.TCP_NODELAY, true)
-                                             .handler(new ZKClientPipelineFactory(addr.getHostString(), addr.getPort()));
+        // 初始化 netty Bootstrap
+        Bootstrap bootstrap = new Bootstrap().group(eventLoopGroup) // 设置 eventLoopGroup
+                                             .channel(NettyUtils.nioOrEpollSocketChannel()) // 选择合适的 SocketChannel
+                                             .option(ChannelOption.SO_LINGER, -1) // 对应套接字选项SO_LINGER
+                                             .option(ChannelOption.TCP_NODELAY, true) // 对应套接字选项 TCP_NODELAY
+                                             .handler(new ZKClientPipelineFactory(addr.getHostString(), addr.getPort())); // 设置处理器
         bootstrap = configureBootstrapAllocator(bootstrap);
         bootstrap.validate();
 
+        // 获取 connectLock
         connectLock.lock();
         try {
+            // Netty 异步调用
             connectFuture = bootstrap.connect(addr);
+            // 监听并处理返回结果
             connectFuture.addListener(new ChannelFutureListener() {
                 @Override
                 public void operationComplete(ChannelFuture channelFuture) throws Exception {
@@ -148,12 +154,15 @@ public class ClientCnxnSocketNetty extends ClientCnxnSocket {
                     try {
                         if (!channelFuture.isSuccess()) {
                             LOG.warn("future isn't success.", channelFuture.cause());
+                            // 连接失败则直接返回
                             return;
                         } else if (connectFuture == null) {
                             LOG.info("connect attempt cancelled");
                             // If the connect attempt was cancelled but succeeded
                             // anyway, make sure to close the channel, otherwise
                             // we may leak a file descriptor.
+                            // 如果 connectFuture 为空则证明尝试连接被取消
+                            // 但是因为可能已经连接成功了，所以应当确保 channel 被正常关闭
                             channelFuture.channel().close();
                             return;
                         }
@@ -162,9 +171,11 @@ public class ClientCnxnSocketNetty extends ClientCnxnSocket {
 
                         disconnected.set(false);
                         initialized = false;
+                        // lenBuffer 仅用于读取传入消息的长度（该 Buffer 长度为 4 byte）
                         lenBuffer.clear();
                         incomingBuffer = lenBuffer;
 
+                        // 构建ConnectRequest 设置 Session、之前的观察者和身份验证
                         sendThread.primeConnection();
                         updateNow();
                         updateLastSendAndHeard();
@@ -186,12 +197,15 @@ public class ClientCnxnSocketNetty extends ClientCnxnSocket {
                         // need to wake on connect success or failure to avoid
                         // timing out ClientCnxn.SendThread which may be
                         // blocked waiting for first connect in doTransport().
+                        // 唤醒发送线程中的发送逻辑（向 outgoingQueue 中添加一个 WakeupPacket 空包）
                         wakeupCnxn();
+                        // 避免 ClientCnxn 中的 SendThread 在 doTransport() 中等待第一次连接而被阻塞并最终超时
                         firstConnect.countDown();
                     }
                 }
             });
         } finally {
+            // 释放connectLock
             connectLock.unlock();
         }
     }
@@ -262,6 +276,7 @@ public class ClientCnxnSocketNetty extends ClientCnxnSocket {
         Queue<Packet> pendingQueue,
         ClientCnxn cnxn) throws IOException, InterruptedException {
         try {
+            // 该线程方法会等待连接的建立且超时即返回
             if (!firstConnect.await(waitTimeOut, TimeUnit.MILLISECONDS)) {
                 return;
             }
@@ -271,20 +286,24 @@ public class ClientCnxnSocketNetty extends ClientCnxnSocket {
                     return;
                 }
             } else {
+                // 从 outgoingQueue 队列中获取要发送的 Packet
                 head = outgoingQueue.poll(waitTimeOut, TimeUnit.MILLISECONDS);
             }
             // check if being waken up on closing.
+            // 检查当前是否正处于关闭流程中
             if (!sendThread.getZkState().isAlive()) {
-                // adding back the packet to notify of failure in conLossPacket().
+                // adding back the packet to notify of failure in conLossPacket(). 添加数据包以通知conLossPacket()中的失败
                 addBack(head);
                 return;
             }
             // channel disconnection happened
+            // 当通道断开时
             if (disconnected.get()) {
                 addBack(head);
                 throw new EndOfStreamException("channel for sessionid 0x" + Long.toHexString(sessionId) + " is lost");
             }
             if (head != null) {
+                // 调用 doWrite 方法执行实际的发送数据操作
                 doWrite(pendingQueue, head, cnxn);
             }
         } finally {
@@ -328,8 +347,10 @@ public class ClientCnxnSocketNetty extends ClientCnxnSocket {
     private ChannelFuture sendPkt(Packet p, boolean doFlush) {
         // Assuming the packet will be sent out successfully. Because if it fails,
         // the channel will close and clean up queues.
+        // 创建 ByteBuffer
         p.createBB();
         updateLastSend();
+        // 将 ByteBuffer 转化为 Netty 的 ByteBuf
         final ByteBuf writeBuffer = Unpooled.wrappedBuffer(p.bb);
         final ChannelFuture result = doFlush ? channel.writeAndFlush(writeBuffer) : channel.write(writeBuffer);
         result.addListener(onSendPktDoneListener);
@@ -343,30 +364,43 @@ public class ClientCnxnSocketNetty extends ClientCnxnSocket {
 
     /**
      * doWrite handles writing the packets from outgoingQueue via network to server.
+     *
+     * 在 doWrite 方法中会在验证该 Packet 非 WakeupPacket 后为其设置请求头中的 xid ，
+     * 并将其添加到 pendingQueue 中，最后通过 sendPktOnly 方法将其发送到通道中（暂不刷新通道，方法代码如下），
+     * 然后如果 outgoingQueue 中仍存在待发送的 Packet 则继续重复执行添加 pendingQueue 并发送的逻辑，
+     * 当 outgoingQueue 中的 Packet 全部处理完成后调用 channel.flush() 刷新通道，将本轮数据一起发送
+     *
+     *
      */
     private void doWrite(Queue<Packet> pendingQueue, Packet p, ClientCnxn cnxn) {
         updateNow();
         boolean anyPacketsSent = false;
         while (true) {
+            // 跳过处理 WakeupPacket 数据包
             if (p != WakeupPacket.getInstance()) {
                 if ((p.requestHeader != null)
                     && (p.requestHeader.getType() != ZooDefs.OpCode.ping)
                     && (p.requestHeader.getType() != ZooDefs.OpCode.auth)) {
                     p.requestHeader.setXid(cnxn.getXid());
                     synchronized (pendingQueue) {
+                        // 将该 Packet 添加到 pendingQueue 队列中
                         pendingQueue.add(p);
                     }
                 }
+                // 只发送数据包到通道，而不刷新通道
                 sendPktOnly(p);
+                // 记录本轮存在需要被发送的数据
                 anyPacketsSent = true;
             }
             if (outgoingQueue.isEmpty()) {
                 break;
             }
+            // 从outgoingQueue 队列获取 Packet
             p = outgoingQueue.remove();
         }
         // TODO: maybe we should flush in the loop above every N packets/bytes?
         // But, how do we determine the right value for N ...
+        // 如果本轮存在需要被发送的数据，则调用 flush 刷新 Netty 通道
         if (anyPacketsSent) {
             channel.flush();
         }
@@ -487,9 +521,12 @@ public class ClientCnxnSocketNetty extends ClientCnxnSocket {
             updateNow();
             while (buf.isReadable()) {
                 if (incomingBuffer.remaining() > buf.readableBytes()) {
+                    // 如果 incomingBuffer 中剩余的空间大于 ByteBuf 中可读数据长度
+                    // 重置 incomingBuffer 中的 limit 为 incomingBuffer 当前的 position 加上 ByteBuf 中可读的数据长度
                     int newLimit = incomingBuffer.position() + buf.readableBytes();
                     incomingBuffer.limit(newLimit);
                 }
+                // 将 ByteBuf 中的数据读入到 incomingBuffer（ ByteBuffer）中
                 buf.readBytes(incomingBuffer);
                 incomingBuffer.limit(incomingBuffer.capacity());
 
@@ -497,21 +534,27 @@ public class ClientCnxnSocketNetty extends ClientCnxnSocket {
                     incomingBuffer.flip();
                     if (incomingBuffer == lenBuffer) {
                         recvCount.getAndIncrement();
+                        // 当 incomingBuffer 等于 lenBuffer 时首先读取数据包中数据的长度 4byte
                         readLength();
                     } else if (!initialized) {
+                        // 如果未进行初始化则首先读取连接结果
                         readConnectResult();
+                        // 重置 lenBuffer 并重新初始化 incomingBuffer 为 lenBuffer 来读取数据包中真正数据的长度
                         lenBuffer.clear();
                         incomingBuffer = lenBuffer;
                         initialized = true;
                         updateLastHeard();
                     } else {
+                        // 读取数据包中真正的数据
                         sendThread.readResponse(incomingBuffer);
+                        // 重置 lenBuffer 并重新初始化 incomingBuffer 为 lenBuffer 来读取数据包中真正数据的长度
                         lenBuffer.clear();
                         incomingBuffer = lenBuffer;
                         updateLastHeard();
                     }
                 }
             }
+            // 唤醒发送逻辑
             wakeupCnxn();
             // Note: SimpleChannelInboundHandler releases the ByteBuf for us
             // so we don't need to do it.

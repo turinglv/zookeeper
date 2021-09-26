@@ -71,6 +71,7 @@ public class NettyUtils {
      * @return a new {@link EventLoopGroup}.
      */
     public static EventLoopGroup newNioOrEpollEventLoopGroup(int nThreads) {
+        // 如果 Epoll 可用（ Linux ）则优先使用 EpollEventLoopGroup 否则使用 NioEventLoopGroup
         if (Epoll.isAvailable()) {
             return new EpollEventLoopGroup(nThreads);
         } else {

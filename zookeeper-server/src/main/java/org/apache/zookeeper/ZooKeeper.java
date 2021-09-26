@@ -644,6 +644,7 @@ public class ZooKeeper implements AutoCloseable {
         this.hostProvider = hostProvider;
         ConnectStringParser connectStringParser = new ConnectStringParser(connectString);
 
+        // 创建连接管理器
         cnxn = createConnection(
             connectStringParser.getChrootPath(),
             hostProvider,
@@ -1035,9 +1036,11 @@ public class ZooKeeper implements AutoCloseable {
             (sessionPasswd == null ? "<null>" : "<hidden>"));
 
         this.clientConfig = clientConfig != null ? clientConfig : new ZKClientConfig();
+        // 解析服务端地址 支持IPV6 getChroot 获取根节点（命名空间）
         ConnectStringParser connectStringParser = new ConnectStringParser(connectString);
         this.hostProvider = hostProvider;
 
+        // 初始化ClientCnxn
         cnxn = new ClientCnxn(
             connectStringParser.getChrootPath(),
             hostProvider,
@@ -1049,6 +1052,7 @@ public class ZooKeeper implements AutoCloseable {
             sessionPasswd,
             canBeReadOnly);
         cnxn.seenRwServerBefore = true; // since user has provided sessionId
+        // 调用ClientCnxn  start 启动内部sendThread、eventThread
         cnxn.start();
     }
 
@@ -1127,6 +1131,7 @@ public class ZooKeeper implements AutoCloseable {
             sessionId,
             sessionPasswd,
             canBeReadOnly,
+            // 默认使用 StaticHostProvider 解析服务端地址
             createDefaultHostProvider(connectString));
     }
 
@@ -1328,12 +1333,14 @@ public class ZooKeeper implements AutoCloseable {
         List<ACL> acl,
         CreateMode createMode) throws KeeperException, InterruptedException {
         final String clientPath = path;
+        // 相关信息验证
         PathUtils.validatePath(clientPath, createMode.isSequential());
         EphemeralType.validateTTL(createMode, -1);
         validateACL(acl);
 
         final String serverPath = prependChroot(clientPath);
 
+        // 创建 Request 请求包和 Response 响应包
         RequestHeader h = new RequestHeader();
         h.setType(createMode.isContainer() ? ZooDefs.OpCode.createContainer : ZooDefs.OpCode.create);
         CreateRequest request = new CreateRequest();
@@ -1342,10 +1349,13 @@ public class ZooKeeper implements AutoCloseable {
         request.setFlags(createMode.toFlag());
         request.setPath(serverPath);
         request.setAcl(acl);
+        // 提交请求并接收返回头
         ReplyHeader r = cnxn.submitRequest(h, request, response, null);
+        // 处理异常
         if (r.getErr() != 0) {
             throw KeeperException.create(KeeperException.Code.get(r.getErr()), clientPath);
         }
+        // 返回结果
         if (cnxn.chrootPath == null) {
             return response.getPath();
         } else {
@@ -1501,11 +1511,12 @@ public class ZooKeeper implements AutoCloseable {
         StringCallback cb,
         Object ctx) {
         final String clientPath = path;
+        // 相关信息验证（与同步模式相同）
         PathUtils.validatePath(clientPath, createMode.isSequential());
         EphemeralType.validateTTL(createMode, -1);
 
         final String serverPath = prependChroot(clientPath);
-
+        // 创建 Request 请求包和 Response 响应包（与同步模式相同）
         RequestHeader h = new RequestHeader();
         h.setType(createMode.isContainer() ? ZooDefs.OpCode.createContainer : ZooDefs.OpCode.create);
         CreateRequest request = new CreateRequest();
@@ -1515,6 +1526,7 @@ public class ZooKeeper implements AutoCloseable {
         request.setFlags(createMode.toFlag());
         request.setPath(serverPath);
         request.setAcl(acl);
+        // 直接调用 queuePacket 方法创建 Packet 并入队 outgoingQueue
         cnxn.queuePacket(h, r, request, response, cb, clientPath, serverPath, ctx, null);
     }
 
@@ -3027,16 +3039,21 @@ public class ZooKeeper implements AutoCloseable {
     }
 
     private ClientCnxnSocket getClientCnxnSocket() throws IOException {
+        // 从配置文件中获取 ClientCnxnSocket 配置信息
         String clientCnxnSocketName = getClientConfig().getProperty(ZKClientConfig.ZOOKEEPER_CLIENT_CNXN_SOCKET);
+        // 如果配置文件中没有提供 ClientCnxnSocket 配置信息 或者 配置信息为ClientCnxnSocketNIO 则默认使用 NIO
         if (clientCnxnSocketName == null || clientCnxnSocketName.equals(ClientCnxnSocketNIO.class.getSimpleName())) {
             clientCnxnSocketName = ClientCnxnSocketNIO.class.getName();
+        // 如果配置信息为ClientCnxnSocketNetty 则使用 Netty
         } else if (clientCnxnSocketName.equals(ClientCnxnSocketNetty.class.getSimpleName())) {
             clientCnxnSocketName = ClientCnxnSocketNetty.class.getName();
         }
 
         try {
+            // 通过反射获取 ClientCnxnSocket 的构造方法
             Constructor<?> clientCxnConstructor = Class.forName(clientCnxnSocketName)
                                                        .getDeclaredConstructor(ZKClientConfig.class);
+            // 通过以客户端配置为入参调用构造方法来创建一个 ClientCnxnSocket 实例
             ClientCnxnSocket clientCxnSocket = (ClientCnxnSocket) clientCxnConstructor.newInstance(getClientConfig());
             return clientCxnSocket;
         } catch (Exception e) {

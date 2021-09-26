@@ -436,12 +436,16 @@ public class ClientCnxn {
         this.connectTimeout = sessionTimeout / hostProvider.size();
         this.readTimeout = sessionTimeout * 2 / 3;
 
+        // 初始化SendThread，管理客户端和服务端之间的网络I/O，依赖于clientCnxnSocket，守护线程
         this.sendThread = new SendThread(clientCnxnSocket);
+        // 初始化EventThread，用于事件处理，会被设置为守护线程
         this.eventThread = new EventThread();
+        // 初始化超时机制
         initRequestTimeout();
     }
 
     public void start() {
+        // 启动sendThread、eventThread
         sendThread.start();
         eventThread.start();
     }
@@ -526,14 +530,18 @@ public class ClientCnxn {
         @SuppressFBWarnings("JLM_JSR166_UTILCONCURRENT_MONITORENTER")
         public void queuePacket(Packet packet) {
             if (wasKilled) {
+                // EventThread 在接收到 eventOfDeath 后 wasKilled 将被设为 true
                 synchronized (waitingEvents) {
                     if (isRunning) {
+                        // 如果 EventThread 仍在运行（isRunning == true）则将 Packet 入队 waitingEvents
                         waitingEvents.add(packet);
                     } else {
+                        // 否则直接调用 processEvent 方法处理该 Packet
                         processEvent(packet);
                     }
                 }
             } else {
+                // 如果 EventThread 线程正常运行则直接将 Packet 入队 waitingEvents
                 waitingEvents.add(packet);
             }
         }
@@ -548,15 +556,20 @@ public class ClientCnxn {
             try {
                 isRunning = true;
                 while (true) {
+                    // 从 waitingEvents 队列中获取事件
                     Object event = waitingEvents.take();
                     if (event == eventOfDeath) {
+                        // 如果事件类型为 eventOfDeath 则修改 wasKilled 标志值
                         wasKilled = true;
                     } else {
+                        // 否则通过调用 processEvent 处理该事件
                         processEvent(event);
                     }
                     if (wasKilled) {
+                        // 如果当前状态为 wasKilled == true 则判断当前 waitingEvents 是否已空
                         synchronized (waitingEvents) {
                             if (waitingEvents.isEmpty()) {
+                                // 如果 waitingEvents 已空则设置 isRunning 为 false 来终止当前线程的运行
                                 isRunning = false;
                                 break;
                             }
@@ -670,9 +683,13 @@ public class ClientCnxn {
                             cb.processResult(rc, clientPath, p.ctx, null, null);
                         }
                     } else if (p.response instanceof CreateResponse) {
+                        // 当进行异步 Create 时，事件类型为 CreateResponse
+                        // 获取 Packet 中的回调信息
                         StringCallback cb = (StringCallback) p.cb;
+                        // 获取 Packet 中的响应体
                         CreateResponse rsp = (CreateResponse) p.response;
                         if (rc == Code.OK.intValue()) {
+                            // 进行方法回调
                             cb.processResult(
                                 rc,
                                 clientPath,
@@ -743,6 +760,7 @@ public class ClientCnxn {
         }
         // Add all the removed watch events to the event queue, so that the
         // clients will be notified with 'Data/Child WatchRemoved' event type.
+        // watch事件处理
         if (p.watchDeregistration != null) {
             Map<EventType, Set<Watcher>> materializedWatchers = null;
             try {
@@ -762,14 +780,18 @@ public class ClientCnxn {
                 p.replyHeader.setErr(ke.code().intValue());
             }
         }
-
         if (p.cb == null) {
+            // 如果 Packet 中不存在方法回调（同步 API）
             synchronized (p) {
+                // 设置 Packet 处理完成
                 p.finished = true;
+                // 唤醒所有 wait 在该 Packet 上的线程
                 p.notifyAll();
             }
         } else {
+            // 如果 Packet 中不存在方法回调（异步 API），先设置 Packet 处理完成
             p.finished = true;
+            // 进入异步 Packet 的处理逻辑
             eventThread.queuePacket(p);
         }
     }
@@ -874,16 +896,21 @@ public class ClientCnxn {
         void readResponse(ByteBuffer incomingBuffer) throws IOException {
             ByteBufferInputStream bbis = new ByteBufferInputStream(incomingBuffer);
             BinaryInputArchive bbia = BinaryInputArchive.getArchive(bbis);
+            // 创建临时响应头
             ReplyHeader replyHdr = new ReplyHeader();
 
+            // 解析数据包中的数据填充临时响应头，然后根据临时响应头中的 xid 进行分类处理
             replyHdr.deserialize(bbia, "header");
             switch (replyHdr.getXid()) {
             case PING_XID:
                 LOG.debug("Got ping response for session id: 0x{} after {}ms.",
                     Long.toHexString(sessionId),
                     ((System.nanoTime() - lastPingSentNs) / 1000000));
+                // xid == -2 为心跳包
+                // 心跳包不做处理直接返回
                 return;
               case AUTHPACKET_XID:
+                  // xid == -4 为认证包
                 LOG.debug("Got auth session id: 0x{}", Long.toHexString(sessionId));
                 if (replyHdr.getErr() == KeeperException.Code.AUTHFAILED.intValue()) {
                     changeZkState(States.AUTH_FAILED);
@@ -893,6 +920,7 @@ public class ClientCnxn {
                 }
               return;
             case NOTIFICATION_XID:
+                // xid == -1 为通知包
                 LOG.debug("Got notification session id: 0x{}",
                     Long.toHexString(sessionId));
                 WatcherEvent event = new WatcherEvent();
@@ -931,6 +959,7 @@ public class ClientCnxn {
 
             Packet packet;
             synchronized (pendingQueue) {
+                // 如果 pendingQueue 为空则直接抛异常，否则出队一个 Packet
                 if (pendingQueue.size() == 0) {
                     throw new IOException("Nothing in the queue, but got " + replyHdr.getXid());
                 }
@@ -940,7 +969,9 @@ public class ClientCnxn {
              * Since requests are processed in order, we better get a response
              * to the first request!
              */
+            // 由于请求是按顺序处理的，所以获得对第一个请求的响应
             try {
+                // 如果 pendingQueue 刚刚出队的 Packet 不是当前响应所对应的 Packet 则证明出现异常
                 if (packet.requestHeader.getXid() != replyHdr.getXid()) {
                     packet.replyHeader.setErr(KeeperException.Code.CONNECTIONLOSS.intValue());
                     throw new IOException("Xid out of order. Got Xid " + replyHdr.getXid()
@@ -949,18 +980,22 @@ public class ClientCnxn {
                                           + " for a packet with details: " + packet);
                 }
 
+                // 填充 Packet 响应头数据
                 packet.replyHeader.setXid(replyHdr.getXid());
                 packet.replyHeader.setErr(replyHdr.getErr());
                 packet.replyHeader.setZxid(replyHdr.getZxid());
+                // 更新最后处理的 zxid
                 if (replyHdr.getZxid() > 0) {
                     lastZxid = replyHdr.getZxid();
                 }
+                // 如果 Packet 中存在 Response 响应包（数据为空）且响应头解析未出现错误则继续解析响应体数据
                 if (packet.response != null && replyHdr.getErr() == 0) {
                     packet.response.deserialize(bbia, "response");
                 }
 
                 LOG.debug("Reading reply session id: 0x{}, packet:: {}", Long.toHexString(sessionId), packet);
             } finally {
+                // 完整响应数据解析后调用
                 finishPacket(packet);
             }
         }
@@ -1138,6 +1173,7 @@ public class ClientCnxn {
                     LOG.warn("Unexpected exception", e);
                 }
             }
+            // 设置状态为 CONNECTING
             changeZkState(States.CONNECTING);
 
             String hostPort = addr.getHostString() + ":" + addr.getPort();
@@ -1163,7 +1199,7 @@ public class ClientCnxn {
                 }
             }
             logStartConnect(addr);
-
+            // 调用 ClientCnxnSocket 的 connect 方法尝试连接
             clientCnxnSocket.connect(addr);
         }
 
@@ -1176,30 +1212,41 @@ public class ClientCnxn {
 
         @Override
         public void run() {
+            // 设置clientCnxnSocket相关属性，sessionId用于 Log and Exception messages
             clientCnxnSocket.introduce(this, sessionId, outgoingQueue);
+            //初始化当前时间 now = Time.currentElapsedTime() = System.nanoTime() / 1000000;
             clientCnxnSocket.updateNow();
+            // 更新发信、收信时间 this.lastSend = now;this.lastHeard = now;
             clientCnxnSocket.updateLastSendAndHeard();
             int to;
+            // 最后ping读写时间
             long lastPingRwServer = Time.currentElapsedTime();
+            // 最大send ping时间间隔 10S
             final int MAX_SEND_PING_INTERVAL = 10000; //10 seconds
             InetSocketAddress serverAddress = null;
+            // state != CLOSED && state != AUTH_FAILED
             while (state.isAlive()) {
                 try {
+                    // clientCnxnSocket 没有连接到服务端
                     if (!clientCnxnSocket.isConnected()) {
                         // don't re-establish connection if we are closing
                         if (closing) {
                             break;
                         }
+                        // 如果读写服务器地址不为空，用读写服务器地址
                         if (rwServerAddress != null) {
                             serverAddress = rwServerAddress;
                             rwServerAddress = null;
                         } else {
+                            // 挨个访问服务器地址列表里的地址，间隔 1 s
                             serverAddress = hostProvider.next(1000);
                         }
                         onConnecting(serverAddress);
+                        // 开始连接
                         startConnect(serverAddress);
                         // Update now to start the connection timer right after we make a connection attempt
                         clientCnxnSocket.updateNow();
+                        // 更新Socket最后一次发送以及接收消息的时间
                         clientCnxnSocket.updateLastSendAndHeard();
                     }
 
@@ -1241,6 +1288,7 @@ public class ClientCnxn {
                         to = connectTimeout - clientCnxnSocket.getIdleRecv();
                     }
 
+                    // 连接超时
                     if (to <= 0) {
                         String warnInfo = String.format(
                             "Client session timed out, have not heard from server in %dms for session id 0x%s",
@@ -1279,6 +1327,7 @@ public class ClientCnxn {
                         to = Math.min(to, pingRwTimeout - idlePingRwServer);
                     }
 
+                    // 处理真正的 I/O 操作
                     clientCnxnSocket.doTransport(to, pendingQueue, ClientCnxn.this);
                 } catch (Throwable e) {
                     if (closing) {
@@ -1565,6 +1614,7 @@ public class ClientCnxn {
         WatchRegistration watchRegistration,
         WatchDeregistration watchDeregistration) throws InterruptedException {
         ReplyHeader r = new ReplyHeader();
+        // 根据 Request 数据和 Response 数据打包创建 Packet
         Packet packet = queuePacket(
             h,
             r,
@@ -1579,15 +1629,18 @@ public class ClientCnxn {
         synchronized (packet) {
             if (requestTimeout > 0) {
                 // Wait for request completion with timeout
+                // 等待请求完成超时
                 waitForPacketFinish(r, packet);
             } else {
                 // Wait for request completion infinitely
+                // 等待请求完成
                 while (!packet.finished) {
                     packet.wait();
                 }
             }
         }
         if (r.getErr() == Code.REQUESTTIMEOUT.intValue()) {
+            // 如果请求超时则清空 outgoingQueue 和 pendingQueue
             sendThread.cleanAndNotifyState();
         }
         return r;
@@ -1657,6 +1710,7 @@ public class ClientCnxn {
         // Note that we do not generate the Xid for the packet yet. It is
         // generated later at send-time, by an implementation of ClientCnxnSocket::doIO(),
         // where the packet is actually sent.
+        // 创建一个 Packet 实例并将相关数据填入
         packet = new Packet(h, r, request, response, watchRegistration);
         packet.cb = cb;
         packet.ctx = ctx;
@@ -1667,18 +1721,23 @@ public class ClientCnxn {
         // 1. synchronize with the final cleanup() in SendThread.run() to avoid race
         // 2. synchronized against each packet. So if a closeSession packet is added,
         // later packet will be notified.
+        // 同步状态
         synchronized (state) {
             if (!state.isAlive() || closing) {
+                // 如果当前连接已断开或者正在关闭则返回相应的错误信息
                 conLossPacket(packet);
             } else {
                 // If the client is asking to close the session then
                 // mark as closing
+                // 如果客户端要求关闭会话，则将其状态标记为正在关闭（Closing）
                 if (h.getType() == OpCode.closeSession) {
                     closing = true;
                 }
+                // 如果请求超时则清空 outgoingQueue 和 pendingQueue
                 outgoingQueue.add(packet);
             }
         }
+        // 唤醒发送线程发送 outgoing 队列中的 Packet（Netty 中为空实现）
         sendThread.getClientCnxnSocket().packetAdded();
         return packet;
     }
