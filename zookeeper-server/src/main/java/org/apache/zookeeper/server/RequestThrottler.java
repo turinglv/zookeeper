@@ -144,6 +144,7 @@ public class RequestThrottler extends ZooKeeperCriticalThread {
                     break;
                 }
 
+                // 阻塞式获取，即只要数据被提交，就会被立即处理
                 Request request = submittedRequests.take();
                 if (Request.requestOfDeath == request) {
                     break;
@@ -154,6 +155,7 @@ public class RequestThrottler extends ZooKeeperCriticalThread {
                 }
 
                 // Throttling is disabled when maxRequests = 0
+                // maxRequests等于0 不开启限流控制
                 if (maxRequests > 0) {
                     while (!killed) {
                         if (dropStaleRequests && request.isStale()) {
@@ -163,6 +165,7 @@ public class RequestThrottler extends ZooKeeperCriticalThread {
                             request = null;
                             break;
                         }
+                        // 只要没达到最大限制，直接通过
                         if (zks.getInProcess() < maxRequests) {
                             break;
                         }
@@ -185,6 +188,7 @@ public class RequestThrottler extends ZooKeeperCriticalThread {
                       request.setIsThrottled(true);
                       ServerMetrics.getMetrics().THROTTLED_OPS.add(1);
                     }
+                    // 验证通过后，提交给 zkServer 处理
                     zks.submitRequestNow(request);
                 }
             }
@@ -240,11 +244,13 @@ public class RequestThrottler extends ZooKeeperCriticalThread {
     }
 
     public void submitRequest(Request request) {
+        // 如果已停止，则删除队列
         if (stopping) {
             LOG.debug("Shutdown in progress. Request cannot be processed");
             dropRequest(request);
         } else {
             request.requestThrottleQueueTime = Time.currentElapsedTime();
+            // LinkedBlockingQueue 入队，最终由该线程去异步处理
             submittedRequests.add(request);
         }
     }

@@ -42,6 +42,7 @@ import org.slf4j.LoggerFactory;
 
 /**
  * This class starts and runs a standalone ZooKeeperServer.
+ * 服务端单机模式启动入口类
  */
 @InterfaceAudience.Public
 public class ZooKeeperServerMain {
@@ -65,6 +66,7 @@ public class ZooKeeperServerMain {
     public static void main(String[] args) {
         ZooKeeperServerMain main = new ZooKeeperServerMain();
         try {
+            // 根据命令行参数初始化并运行 Zookeeper 服务端
             main.initializeAndRun(args);
         } catch (IllegalArgumentException e) {
             LOG.error("Invalid arguments, exiting abnormally", e);
@@ -103,6 +105,7 @@ public class ZooKeeperServerMain {
             LOG.warn("Unable to register log4j JMX control", e);
         }
 
+        // 从命令行解析参数至 ServerConfig 实例中
         ServerConfig config = new ServerConfig();
         if (args.length == 1) {
             config.parse(args[0]);
@@ -110,6 +113,7 @@ public class ZooKeeperServerMain {
             config.parse(args);
         }
 
+        // 调用该方法创建并启动 Zookeeper 服务端
         runFromConfig(config);
     }
 
@@ -136,38 +140,50 @@ public class ZooKeeperServerMain {
             // so rather than spawning another thread, we will just call
             // run() in this thread.
             // create a file logger url from the command line args
+            // 3.创建ZooKeeper数据管理器
             txnLog = new FileTxnSnapLog(config.dataLogDir, config.dataDir);
             JvmPauseMonitor jvmPauseMonitor = null;
             if (config.jvmPauseMonitorToRun) {
                 jvmPauseMonitor = new JvmPauseMonitor(config);
             }
+            // 创建 Zookeeper 服务端实例
             final ZooKeeperServer zkServer = new ZooKeeperServer(jvmPauseMonitor, txnLog, config.tickTime, config.minSessionTimeout, config.maxSessionTimeout, config.listenBacklog, null, config.initialConfig);
+            // 将 Zookeeper 服务端实例与本地事务文件存储进行绑定
             txnLog.setServerStats(zkServer.serverStats());
 
             // Registers shutdown handler which will be used to know the
             // server error or shutdown state changes.
+            // 4.注册shutdownHandler,在ZooKeeperServer的状态变化时调用shutdownHandler的handle()
             final CountDownLatch shutdownLatch = new CountDownLatch(1);
             zkServer.registerServerShutdownHandler(new ZooKeeperServerShutdownHandler(shutdownLatch));
 
             // Start Admin server
+            // 5.启动Admin server
             adminServer = AdminServerFactory.createAdminServer();
             adminServer.setZooKeeperServer(zkServer);
             adminServer.start();
 
+            // 6.创建并启动网络IO管理器
             boolean needStartZKServer = true;
             if (config.getClientPortAddress() != null) {
+                // 通过静态方法 createFactory 创建 ServerCnxnFactory 实例
                 cnxnFactory = ServerCnxnFactory.createFactory();
+                // 根据配置文件中的 ClientPostAddress 配置其客户端端口
                 cnxnFactory.configure(config.getClientPortAddress(), config.getMaxClientCnxns(), config.getClientPortListenBacklog(), false);
+                // 使用 ServerCnxnFactory 启动 zookeeperServer
                 cnxnFactory.startup(zkServer);
                 // zkServer has been started. So we don't need to start it again in secureCnxnFactory.
+                // 因为在此处 zkServer 已经启动，所以我们不需要在 secureCnxnFactory 中再次启动它
                 needStartZKServer = false;
             }
+            // 8.创建并启动secureCnxnFactory
             if (config.getSecureClientPortAddress() != null) {
                 secureCnxnFactory = ServerCnxnFactory.createFactory();
                 secureCnxnFactory.configure(config.getSecureClientPortAddress(), config.getMaxClientCnxns(), config.getClientPortListenBacklog(), true);
                 secureCnxnFactory.startup(zkServer, needStartZKServer);
             }
 
+            // 9.创建并启动ContainerManager
             containerManager = new ContainerManager(
                 zkServer.getZKDatabase(),
                 zkServer.firstProcessor,
@@ -182,6 +198,7 @@ public class ZooKeeperServerMain {
 
             // Watch status of ZooKeeper server. It will do a graceful shutdown
             // if the server is not running or hits an internal error.
+            // 服务器正常启动时,运行到此处阻塞,只有server的state变为ERROR或SHUTDOWN时继续运行后面的代码
             shutdownLatch.await();
 
             shutdown();

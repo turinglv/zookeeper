@@ -695,6 +695,7 @@ public class ZooKeeperServer implements SessionExpirer, ServerStats.Provider {
     }
 
     public synchronized void startup() {
+        // 启动zkServer 并设置为 RUNNING 状态
         startupWithServerState(State.RUNNING);
     }
 
@@ -708,18 +709,23 @@ public class ZooKeeperServer implements SessionExpirer, ServerStats.Provider {
     }
 
     private void startupWithServerState(State state) {
+        // session 管理
         if (sessionTracker == null) {
             createSessionTracker();
         }
         startSessionTracker();
+        // 请求前置处理器，是一个生产消费队列，对每个请求状态码进行判断，分别进行请求前置处理
         setupRequestProcessors();
 
         startRequestThrottler();
 
+        // 注册jmx bean
         registerJMX();
 
+        // jvm停止监控，默认不开启
         startJvmPauseMonitor();
 
+        // 通过zxdb和zkserver填写相关指标
         registerMetrics();
 
         setState(state);
@@ -1138,10 +1144,12 @@ public class ZooKeeperServer implements SessionExpirer, ServerStats.Provider {
                 }
             }
         }
+        // 提交请求给限流器
         requestThrottler.submitRequest(si);
     }
 
     public void submitRequestNow(Request si) {
+        // 确保处理器链已生成
         if (firstProcessor == null) {
             synchronized (this) {
                 try {
@@ -1149,6 +1157,8 @@ public class ZooKeeperServer implements SessionExpirer, ServerStats.Provider {
                     // processor it should wait for setting up the request
                     // processor chain. The state will be updated to RUNNING
                     // after the setup.
+                    // 因为所有的请求都被传递给请求处理器，所以应该等待请求处理器链建立完成
+                    // 且当请求处理器链建立完成后，状态将更新为 RUNNING
                     while (state == State.INITIAL) {
                         wait(1000);
                     }
@@ -1161,18 +1171,23 @@ public class ZooKeeperServer implements SessionExpirer, ServerStats.Provider {
             }
         }
         try {
+            // 验证 sessionId
             touch(si.cnxn);
+            // 验证 Request 是否有效
             boolean validpacket = Request.isValid(si.type);
             if (validpacket) {
                 setLocalSessionFlag(si);
+                // 如果 Request 有效则将其传递给请求处理链（Request Processor Pipeline）的第一个请求处理器
                 firstProcessor.processRequest(si);
                 if (si.cnxn != null) {
+                    // 更新处理数量
                     incInProcess();
                 }
             } else {
                 LOG.warn("Received packet at server of unknown type {}", si.type);
                 // Update request accounting/throttling limits
                 requestFinished(si);
+                // 该请求来自未知类型的客户端
                 new UnimplementedRequestProcessor().processRequest(si);
             }
         } catch (MissingSessionException e) {
@@ -1598,6 +1613,7 @@ public class ZooKeeperServer implements SessionExpirer, ServerStats.Provider {
         // We have the request, now process and setup for next
         InputStream bais = new ByteBufferInputStream(incomingBuffer);
         BinaryInputArchive bia = BinaryInputArchive.getArchive(bais);
+        // 解析请求头至临时变量 h
         RequestHeader h = new RequestHeader();
         h.deserialize(bia, "header");
 
@@ -1615,6 +1631,7 @@ public class ZooKeeperServer implements SessionExpirer, ServerStats.Provider {
         // Through the magic of byte buffers, txn will not be
         // pointing
         // to the start of the txn
+        // 从原缓冲区的当前位置开始创建一个新的字节缓冲区
         incomingBuffer = incomingBuffer.slice();
         if (h.getType() == OpCode.auth) {
             LOG.info("got auth packet {}", cnxn.getRemoteSocketAddress());
@@ -1666,6 +1683,7 @@ public class ZooKeeperServer implements SessionExpirer, ServerStats.Provider {
                 // Already sent response to user about failure and closed the session, lets return
                 return;
             } else {
+                // 将数据包中的有效数据组装为 Request 请求
                 Request si = new Request(cnxn, cnxn.getSessionId(), h.getXid(), h.getType(), incomingBuffer, cnxn.getAuthInfo());
                 int length = incomingBuffer.limit();
                 if (isLargeRequest(length)) {
@@ -1674,6 +1692,7 @@ public class ZooKeeperServer implements SessionExpirer, ServerStats.Provider {
                     si.setLargeRequestSize(length);
                 }
                 si.setOwner(ServerCnxn.me);
+                // 将组装好的 Request 请求通过 submitRequest 方法发送给上层逻辑处理
                 submitRequest(si);
             }
         }

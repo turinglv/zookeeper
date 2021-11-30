@@ -87,7 +87,9 @@ public class QuorumPeerMain {
      */
     public static void main(String[] args) {
         QuorumPeerMain main = new QuorumPeerMain();
+        // 服务端启动入口
         try {
+            // 根据命令行参数初始化并运行 Zookeeper 服务端
             main.initializeAndRun(args);
         } catch (IllegalArgumentException e) {
             LOG.error("Invalid arguments, exiting abnormally", e);
@@ -120,12 +122,14 @@ public class QuorumPeerMain {
     }
 
     protected void initializeAndRun(String[] args) throws ConfigException, IOException, AdminServerException {
+        // 1.解析配置文件
         QuorumPeerConfig config = new QuorumPeerConfig();
         if (args.length == 1) {
             config.parse(args[0]);
         }
 
         // Start and schedule the the purge task
+        // 2.创建并启动历史文件清理器(对事务日志和快照数据文件进行定时清理)
         DatadirCleanupManager purgeMgr = new DatadirCleanupManager(
             config.getDataDir(),
             config.getDataLogDir(),
@@ -134,10 +138,12 @@ public class QuorumPeerMain {
         purgeMgr.start();
 
         if (args.length == 1 && config.isDistributed()) {
+            // 集群启动
             runFromConfig(config);
         } else {
             LOG.warn("Either no config or no quorum defined in config, running in standalone mode");
             // there is only server in the quorum -- run as standalone
+            // 单机启动
             ZooKeeperServerMain.main(args);
         }
     }

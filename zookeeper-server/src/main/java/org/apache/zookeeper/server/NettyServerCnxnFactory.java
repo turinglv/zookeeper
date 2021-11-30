@@ -202,6 +202,8 @@ public class NettyServerCnxnFactory extends ServerCnxnFactory {
     @Sharable
     class CnxnChannelHandler extends ChannelDuplexHandler {
 
+        // 当服务端接受客户端的socket连接之后，channelActive会被调用
+        // 正常情况下通过channelActive服务端session层的连接表示对象会被建立起来
         @Override
         public void channelActive(ChannelHandlerContext ctx) throws Exception {
             if (LOG.isTraceEnabled()) {
@@ -209,12 +211,14 @@ public class NettyServerCnxnFactory extends ServerCnxnFactory {
             }
 
             final Channel channel = ctx.channel();
+            // 连接数有没有达到服务端设置的连接最大数，如果达到了，直接关闭底层socket，拒绝新的连接请求
             if (limitTotalNumberOfCnxns()) {
                 ServerMetrics.getMetrics().CONNECTION_REJECTED.add(1);
                 channel.close();
                 return;
             }
             InetAddress addr = ((InetSocketAddress) channel.remoteAddress()).getAddress();
+            // 单个客户端的连接数是不是超过了用户设置的最大可建立连接数，如果达到了拒绝客户端的连接请求
             if (maxClientCnxns > 0 && getClientCnxnCount(addr) >= maxClientCnxns) {
                 ServerMetrics.getMetrics().CONNECTION_REJECTED.add(1);
                 LOG.warn("Too many connections from {} - max is {}", addr, maxClientCnxns);
@@ -222,7 +226,9 @@ public class NettyServerCnxnFactory extends ServerCnxnFactory {
                 return;
             }
 
+            // 创建session会话层的连接表示对象NettyServerCnxn
             NettyServerCnxn cnxn = new NettyServerCnxn(channel, zkServer, NettyServerCnxnFactory.this);
+            // 把session会话连接表示对象存储到channel中
             ctx.channel().attr(CONNECTION_ATTRIBUTE).set(cnxn);
 
             // Check the zkServer assigned to the cnxn is still running,
@@ -271,6 +277,7 @@ public class NettyServerCnxnFactory extends ServerCnxnFactory {
             }
         }
 
+        // 连接关闭时的处理逻辑
         @Override
         public void channelInactive(ChannelHandlerContext ctx) throws Exception {
             if (LOG.isTraceEnabled()) {
@@ -288,6 +295,7 @@ public class NettyServerCnxnFactory extends ServerCnxnFactory {
             }
         }
 
+        // 异常处理方法
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
             LOG.warn("Exception caught", cause);
@@ -299,6 +307,7 @@ public class NettyServerCnxnFactory extends ServerCnxnFactory {
             }
         }
 
+        // 处理用自定义的channel事件：主要是处理channel读和不读的事件
         @Override
         public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
             try {
@@ -331,6 +340,7 @@ public class NettyServerCnxnFactory extends ServerCnxnFactory {
             }
         }
 
+        // 服务端读取客户端发送来的请求数据
         @Override
         public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
             try {
@@ -339,10 +349,12 @@ public class NettyServerCnxnFactory extends ServerCnxnFactory {
                 }
                 try {
                     LOG.debug("New message {} from {}", msg, ctx.channel());
+                    // 在初始化时的 channelActive 方法中我们将 NettyServerCnxn 注册至 Channel 属性中
                     NettyServerCnxn cnxn = ctx.channel().attr(CONNECTION_ATTRIBUTE).get();
                     if (cnxn == null) {
                         LOG.error("channelRead() on a closed or closing NettyServerCnxn");
                     } else {
+                        // 如果 NettyServerCnxn 未被关闭或未被正在关闭则调用 processMessage 处理请求
                         cnxn.processMessage((ByteBuf) msg);
                     }
                 } catch (Exception ex) {
@@ -350,6 +362,7 @@ public class NettyServerCnxnFactory extends ServerCnxnFactory {
                     throw ex;
                 }
             } finally {
+                // 释放 Buffer
                 ReferenceCountUtil.release(msg);
             }
         }
@@ -519,9 +532,11 @@ public class NettyServerCnxnFactory extends ServerCnxnFactory {
         LOG.info("{} = {}", NETTY_ADVANCED_FLOW_CONTROL, this.advancedFlowControlEnabled);
 
         setOutstandingHandshakeLimit(Integer.getInteger(OUTSTANDING_HANDSHAKE_LIMIT, -1));
-
+        // bossGroup处理客户端的连接请求，workerGroup负责每个连接IO事件的处理，典型的reactor模式
         EventLoopGroup bossGroup = NettyUtils.newNioOrEpollEventLoopGroup(NettyUtils.getClientReachableLocalInetAddressCount());
+        // 创建 workerGroup 且优先选择使用更高性能的 EpollEventLoopGroup
         EventLoopGroup workerGroup = NettyUtils.newNioOrEpollEventLoopGroup();
+        // 创建ServerBootstrap 配置 handler
         ServerBootstrap bootstrap = new ServerBootstrap().group(bossGroup, workerGroup)
                                                          .channel(NettyUtils.nioOrEpollServerSocketChannel())
                                                          // parent channel options
@@ -541,6 +556,7 @@ public class NettyServerCnxnFactory extends ServerCnxnFactory {
                                                                  } else if (shouldUsePortUnification) {
                                                                      initSSL(pipeline, true);
                                                                  }
+                                                                 // 向 pipeline 添加 channelHandler 处理器
                                                                  pipeline.addLast("servercnxnfactory", channelHandler);
                                                              }
                                                          });
@@ -690,9 +706,11 @@ public class NettyServerCnxnFactory extends ServerCnxnFactory {
     @Override
     public void start() {
         if (listenBacklog != -1) {
+            // 设置半连队列大小
             bootstrap.option(ChannelOption.SO_BACKLOG, listenBacklog);
         }
         LOG.info("binding to port {}", localAddress);
+        // 绑定端口
         parentChannel = bootstrap.bind(localAddress).syncUninterruptibly().channel();
         // Port changes after bind() if the original port was 0, update
         // localAddress to get the real port.
@@ -727,9 +745,12 @@ public class NettyServerCnxnFactory extends ServerCnxnFactory {
 
     @Override
     public void startup(ZooKeeperServer zks, boolean startServer) throws IOException, InterruptedException {
+        // 绑定 Netty 监听端口
         start();
+        // 完成 zkServer 和 ServerCnxnFactory 的双向绑定
         setZooKeeperServer(zks);
         if (startServer) {
+            // 启动 zkServer
             zks.startdata();
             zks.startup();
         }

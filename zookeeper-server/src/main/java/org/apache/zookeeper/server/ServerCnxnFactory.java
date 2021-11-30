@@ -127,6 +127,7 @@ public abstract class ServerCnxnFactory {
     }
 
     public void startup(ZooKeeperServer zkServer) throws IOException, InterruptedException {
+        // 启动 zkServer
         startup(zkServer, true);
     }
 
@@ -145,6 +146,7 @@ public abstract class ServerCnxnFactory {
 
     protected ZooKeeperServer zkServer;
     public final void setZooKeeperServer(ZooKeeperServer zks) {
+        // zkServer 和 ServerCnxnFactory 的双向绑定
         this.zkServer = zks;
         if (zks != null) {
             if (secure) {
@@ -158,11 +160,14 @@ public abstract class ServerCnxnFactory {
     public abstract void closeAll(ServerCnxn.DisconnectReason reason);
 
     public static ServerCnxnFactory createFactory() throws IOException {
+        // 从配置文件中获取将要创建的 ServerCnxnFactory 类型
         String serverCnxnFactoryName = System.getProperty(ZOOKEEPER_SERVER_CNXN_FACTORY);
         if (serverCnxnFactoryName == null) {
+            // 如果系统配置文件中未设置该属性则默认使用 JDK 的 NIO 实现版本 NIOServerCnxnFactory
             serverCnxnFactoryName = NIOServerCnxnFactory.class.getName();
         }
         try {
+            // 通过反射调用构造方法实例化 ServerCnxnFactory 对象
             ServerCnxnFactory serverCnxnFactory = (ServerCnxnFactory) Class.forName(serverCnxnFactoryName)
                                                                            .getDeclaredConstructor()
                                                                            .newInstance();

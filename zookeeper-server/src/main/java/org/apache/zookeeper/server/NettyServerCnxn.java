@@ -57,10 +57,16 @@ import org.slf4j.LoggerFactory;
 public class NettyServerCnxn extends ServerCnxn {
 
     private static final Logger LOG = LoggerFactory.getLogger(NettyServerCnxn.class);
+    // 通道
     private final Channel channel;
+    // CompositeByteBuf 在聚合时使用，多个buffer合并时，不需要copy，通过
+    // CompositeByteBuf 可以把需要合并的bytebuf 组合起来，对外提供统一的readindex和writerindex
     private CompositeByteBuf queuedBuffer;
+    // 是否限流
     private final AtomicBoolean throttled = new AtomicBoolean(false);
+    // Byte缓冲区
     private ByteBuffer bb;
+    // 四个字节的缓冲区
     private final ByteBuffer bbLen = ByteBuffer.allocate(4);
     private long sessionId;
     private int sessionTimeout;
@@ -188,9 +194,11 @@ public class NettyServerCnxn extends ServerCnxn {
         if (closingChannel || !channel.isOpen()) {
             return 0;
         }
+        // 序列化数据
         ByteBuffer[] bb = serialize(h, r, tag, cacheKey, stat, opCode);
         int responseSize = bb[0].getInt();
         bb[0].rewind();
+        // 发送数据
         sendBuffer(bb);
         decrOutstandingAndCheckThrottle(h);
         return responseSize;
@@ -211,10 +219,12 @@ public class NettyServerCnxn extends ServerCnxn {
 
     @Override
     public void sendBuffer(ByteBuffer... buffers) {
+        // 如果 ByteBuffer 为 closeConn 则调用 close() 进入关闭逻辑
         if (buffers.length == 1 && buffers[0] == ServerCnxnFactory.closeConn) {
             close(DisconnectReason.CLIENT_CLOSED_CONNECTION);
             return;
         }
+        // 将 ByteBuffer 中的数据写入 Channel 并通过 flush 将其发送
         channel.writeAndFlush(Unpooled.wrappedBuffer(buffers)).addListener(onSendBufferDoneListener);
     }
 
@@ -357,10 +367,12 @@ public class NettyServerCnxn extends ServerCnxn {
         if (throttled.get()) {
             LOG.debug("Received message while throttled");
             // we are throttled, so we need to queue
+            // 如果当前为限流状态则直接进行排队
             if (queuedBuffer == null) {
                 LOG.debug("allocating queue");
                 queuedBuffer = channel.alloc().compositeBuffer();
             }
+            // 添加至 queuedBuffer 中排队
             appendToQueuedBuffer(buf.retainedDuplicate());
             if (LOG.isTraceEnabled()) {
                 LOG.trace("0x{} queuedBuffer {}", Long.toHexString(sessionId), ByteBufUtil.hexDump(queuedBuffer));
@@ -368,12 +380,16 @@ public class NettyServerCnxn extends ServerCnxn {
         } else {
             LOG.debug("not throttled");
             if (queuedBuffer != null) {
+                // 排队队列不为空 直接加入对接排队
                 appendToQueuedBuffer(buf.retainedDuplicate());
+                // 该方法中包含对于 Channel 正在关闭时的处理逻辑，但对于响应的处理实质还是调用 receiveMessage 方法
                 processQueuedBuffer();
             } else {
+                // 调用 receiveMessage 处理响应
                 receiveMessage(buf);
                 // Have to check !closingChannel, because an error in
                 // receiveMessage() could have led to close() being called.
+                // 必须再次检查通道是否正在关闭，因为在 receiveMessage 方法中可能出现错误而导致 close() 被调用
                 if (!closingChannel && buf.isReadable()) {
                     if (LOG.isTraceEnabled()) {
                         LOG.trace("Before copy {}", buf);
@@ -444,8 +460,16 @@ public class NettyServerCnxn extends ServerCnxn {
     private void receiveMessage(ByteBuf message) {
         checkIsInEventLoop("receiveMessage");
         try {
+            // 当writerIndex大于readerIndex(表示ByteBuf中还有可读内容)
+            // 且throttled为false时执行while循环体
             while (message.isReadable() && !throttled.get()) {
+                // bb不为null，表示已经准备好读取message
                 if (bb != null) {
+                    // 其中主要的部分是判断bb的剩余空间是否大于message中的内容，
+                    // 就是判断bb是否还有足够空间存储message内容，
+                    // 然后设置bb的limit，之后将message内容读入bb缓冲中，
+                    // 之后再次确定时候已经读完message内容，统计接收信息，
+                    // 再根据是否已经初始化来处理包或者是连接请求，其中的请求内容都存储在bb中
                     if (LOG.isTraceEnabled()) {
                         LOG.trace("message readable {} bb len {} {}", message.readableBytes(), bb.remaining(), bb);
                         ByteBuffer dat = bb.duplicate();
@@ -453,11 +477,15 @@ public class NettyServerCnxn extends ServerCnxn {
                         LOG.trace("0x{} bb {}", Long.toHexString(sessionId), ByteBufUtil.hexDump(Unpooled.wrappedBuffer(dat)));
                     }
 
+                    // bb剩余空间大于message中可读字节大小
                     if (bb.remaining() > message.readableBytes()) {
+                        // 确定新的limit
                         int newLimit = bb.position() + message.readableBytes();
                         bb.limit(newLimit);
                     }
+                    // 将message写入bb中
                     message.readBytes(bb);
+                    // 重置bb的limit
                     bb.limit(bb.capacity());
 
                     if (LOG.isTraceEnabled()) {
@@ -468,20 +496,28 @@ public class NettyServerCnxn extends ServerCnxn {
                                   Long.toHexString(sessionId),
                                   ByteBufUtil.hexDump(Unpooled.wrappedBuffer(dat)));
                     }
+                    // 已经读完message，表示内容已经全部接收
                     if (bb.remaining() == 0) {
+                        // 翻转，可读
                         bb.flip();
+                        // 统计接收信息
                         packetReceived(4 + bb.remaining());
 
                         ZooKeeperServer zks = this.zkServer;
+                        // Zookeeper服务器为空 抛出异常
                         if (zks == null || !zks.isRunning()) {
                             throw new IOException("ZK down");
                         }
+                        // 未被初始化
                         if (initialized) {
                             // TODO: if zks.processPacket() is changed to take a ByteBuffer[],
                             // we could implement zero-copy queueing.
+                            // 处理bb中包含的包信息
                             zks.processPacket(this, bb);
                         } else {
+                            // 已经初始化
                             LOG.debug("got conn req request from {}", getRemoteSocketAddress());
+                            // 处理连接请求
                             zks.processConnectRequest(this, bb);
                             initialized = true;
                         }
@@ -498,6 +534,7 @@ public class NettyServerCnxn extends ServerCnxn {
                     if (message.readableBytes() < bbLen.remaining()) {
                         bbLen.limit(bbLen.position() + message.readableBytes());
                     }
+                    // 4 byte 的 ByteBuffer 用于读取数据包中前 4 byte 所记录的数据包中实际数据长度
                     message.readBytes(bbLen);
                     bbLen.limit(bbLen.capacity());
                     if (bbLen.remaining() == 0) {
@@ -506,6 +543,7 @@ public class NettyServerCnxn extends ServerCnxn {
                         if (LOG.isTraceEnabled()) {
                             LOG.trace("0x{} bbLen {}", Long.toHexString(sessionId), ByteBufUtil.hexDump(Unpooled.wrappedBuffer(bbLen)));
                         }
+                        // 读取前 4 byte 所代表的的 Int 数值
                         int len = bbLen.getInt();
                         if (LOG.isTraceEnabled()) {
                             LOG.trace("0x{} bbLen len is {}", Long.toHexString(sessionId), len);
@@ -526,6 +564,7 @@ public class NettyServerCnxn extends ServerCnxn {
                         }
                         // checkRequestSize will throw IOException if request is rejected
                         zks.checkRequestSizeWhenReceivingMessage(len);
+                        // 将 bb 赋值为数据包中前 4 byte Int 值长度的 ByteBuffer
                         bb = ByteBuffer.allocate(len);
                     }
                 }
